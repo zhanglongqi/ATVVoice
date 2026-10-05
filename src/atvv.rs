@@ -254,6 +254,7 @@ pub async fn run_session(
                         }
                         // Remote resets its sequence counter on every AUDIO_START
                         last_seq = None;
+                        protocol.on_audio_start();
                         current_stream_id = Some(stream_id);
                         set_state(State::Streaming, &mut state);
                         // Reset keepalive timer when streaming starts/restarts
