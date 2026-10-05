@@ -334,6 +334,8 @@ pub async fn run_session(
                         if audio_tx.send(frame).await.is_err() {
                             tracing::warn!("audio frame dropped: receiver channel full or closed");
                         }
+                    } else {
+                        tracing::debug!("RX notification rejected by decoder: {} bytes", data.len());
                     }
                 }
             }
