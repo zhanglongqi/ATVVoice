@@ -149,6 +149,61 @@ fn should_skip(addr: Address, filter_addr: Option<Address>, excluded: &[Address]
     false
 }
 
+/// What adapter selection needs to know about one BlueZ adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdapterInfo {
+    pub name: String,
+    pub address: Address,
+    /// Whether the remote given with `--device` is paired on this adapter.
+    pub has_paired_device: bool,
+}
+
+/// Pick the adapter to use: `requested` by name (`hci1`) or address, else the one the remote is paired on.
+/// `Ok(None)` means "use BlueZ's default adapter". Adapter names can swap between boots or re-plugs, so
+/// with several adapters the pairing (or an address) is the stable way to find the right one.
+pub fn choose_adapter(adapters: &[AdapterInfo], requested: Option<&str>) -> Result<Option<String>> {
+    if let Some(wanted) = requested {
+        let by_address: Option<Address> = wanted.parse().ok();
+        return adapters
+            .iter()
+            .find(|a| a.name == wanted || Some(a.address) == by_address)
+            .map(|a| Some(a.name.clone()))
+            .with_context(|| format!("no Bluetooth adapter named or addressed {wanted:?}"));
+    }
+    Ok(adapters
+        .iter()
+        .find(|a| a.has_paired_device)
+        .map(|a| a.name.clone()))
+}
+
+/// Resolve the adapter from `--adapter` / `--device` (see `choose_adapter`).
+pub async fn select_adapter(
+    session: &bluer::Session,
+    requested: Option<&str>,
+    device: Option<Address>,
+) -> Result<Adapter> {
+    let mut adapters = Vec::new();
+    for name in session.adapter_names().await? {
+        let adapter = session.adapter(&name)?;
+        let has_paired_device = match device {
+            Some(addr) => match adapter.device(addr) {
+                Ok(dev) => dev.is_paired().await.unwrap_or(false),
+                Err(_) => false,
+            },
+            None => false,
+        };
+        adapters.push(AdapterInfo {
+            name,
+            address: adapter.address().await?,
+            has_paired_device,
+        });
+    }
+    match choose_adapter(&adapters, requested)? {
+        Some(name) => Ok(session.adapter(&name)?),
+        None => Ok(session.default_adapter().await?),
+    }
+}
+
 /// Find a bonded device that advertises the ATVV service.
 /// If `filter_addr` is Some, only match that specific address.
 /// Addresses in `exclude` are skipped (e.g. devices locked by another instance).
@@ -333,6 +388,49 @@ pub async fn vendor_handshake(device: &Device) -> Result<Option<crate::atvv::Ble
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn adapters() -> Vec<AdapterInfo> {
+        vec![
+            AdapterInfo {
+                name: "hci0".into(),
+                address: "48:E7:DA:72:52:94".parse().unwrap(),
+                has_paired_device: false,
+            },
+            AdapterInfo {
+                name: "hci1".into(),
+                address: "8C:68:8B:E2:A0:5F".parse().unwrap(),
+                has_paired_device: true,
+            },
+        ]
+    }
+
+    #[test]
+    fn test_choose_adapter_by_name_or_address() {
+        assert_eq!(
+            choose_adapter(&adapters(), Some("hci0")).unwrap(),
+            Some("hci0".to_string())
+        );
+        assert_eq!(
+            choose_adapter(&adapters(), Some("8c:68:8b:e2:a0:5f")).unwrap(),
+            Some("hci1".to_string())
+        );
+        assert!(choose_adapter(&adapters(), Some("hci7")).is_err());
+    }
+
+    #[test]
+    fn test_choose_adapter_where_device_is_paired() {
+        assert_eq!(
+            choose_adapter(&adapters(), None).unwrap(),
+            Some("hci1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_choose_adapter_falls_back_to_default() {
+        let mut list = adapters();
+        list[1].has_paired_device = false;
+        assert_eq!(choose_adapter(&list, None).unwrap(), None);
+    }
 
     #[test]
     fn test_tx_write_op_prefers_request() {

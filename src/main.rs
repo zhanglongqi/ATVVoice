@@ -33,7 +33,7 @@ struct Cli {
     #[arg(short, long)]
     device: Option<String>,
 
-    /// BlueZ adapter name (default: auto-detect)
+    /// BlueZ adapter name (hci1) or address (default: the adapter the --device remote is paired on, else BlueZ's default)
     #[arg(short, long)]
     adapter: Option<String>,
 
@@ -210,16 +210,16 @@ async fn main() -> anyhow::Result<()> {
 
     // Connect to BlueZ
     let session = bluer::Session::new().await?;
-    let adapter = match &cli.adapter {
-        Some(name) => session.adapter(name)?,
-        None => session.default_adapter().await?,
-    };
-    tracing::info!("Using adapter: {}", adapter.name());
-
     let filter_addr: Option<bluer::Address> = cli
         .device
         .map(|s| s.parse().context("failed to parse device address"))
         .transpose()?;
+    let adapter = ble::select_adapter(&session, cli.adapter.as_deref(), filter_addr).await?;
+    tracing::info!(
+        "Using adapter: {} ({})",
+        adapter.name(),
+        adapter.address().await?
+    );
 
     let timeouts = atvv::SessionTimeouts {
         frame_timeout: std::time::Duration::from_secs(cli.frame_timeout),
