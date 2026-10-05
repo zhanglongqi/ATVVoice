@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use bluer::{gatt::{remote::Characteristic, WriteOp}, Adapter, AdapterEvent, Address, Device, Uuid};
+use bluer::{gatt::{remote::Characteristic, CharacteristicFlags, WriteOp}, Adapter, AdapterEvent, Address, Device, Uuid};
 use futures::{Stream, StreamExt};
 
 use crate::atvv::{BleDevice, BleFut, BleStream, DeviceConnectionEvent};
@@ -48,6 +48,8 @@ const PHILIPS_VENDOR_FF02: Uuid = Uuid::from_u128(0x02f00000_0000_0000_0000_0000
 /// Resolved ATVV characteristics for a connected device.
 pub struct AtvvChars {
     pub tx: Characteristic,
+    /// ATT operation for TX writes, chosen from the TX characteristic's flags.
+    pub tx_write_op: WriteOp,
     pub rx: Characteristic,
     pub ctl: Characteristic,
 }
@@ -56,6 +58,7 @@ impl std::fmt::Debug for AtvvChars {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AtvvChars")
             .field("tx", &"<Characteristic>")
+            .field("tx_write_op", &self.tx_write_op)
             .field("rx", &"<Characteristic>")
             .field("ctl", &"<Characteristic>")
             .finish()
@@ -74,12 +77,10 @@ impl BleDevice for BluerDevice<'_> {
     fn write_command(&self, data: &[u8]) -> BleFut<'_, ()> {
         let data = data.to_vec();
         Box::pin(async move {
-            // TX characteristic has the 'write' flag (not 'write-without-response'),
-            // so we must use ATT Write Request (WriteOp::Request) instead of the
-            // default WriteOp::Command (ATT Write Command). Remotes silently ignore
-            // Write Commands on characteristics that only support Write Request.
+            // See `tx_write_op`: Write Request where the TX characteristic
+            // supports it, Write Command where it only has write-without-response.
             self.chars.tx.write_ext(&data, &bluer::gatt::remote::CharacteristicWriteRequest {
-                op_type: WriteOp::Request,
+                op_type: self.chars.tx_write_op,
                 ..Default::default()
             }).await?;
             Ok(())
@@ -187,6 +188,21 @@ pub async fn find_atvv_device(
     anyhow::bail!("BLE discovery stream ended without finding an ATVV device (adapter may have been removed)")
 }
 
+/// Pick the ATT write operation for the TX characteristic.
+///
+/// Remotes silently discard an ATT Write Command sent to a characteristic that
+/// only has the `write` property (e.g. Philips URMT26RST004), while others
+/// reject an ATT Write Request when TX only has `write-without-response`
+/// (e.g. Chromecast Voice Remote: "Write not permitted"). Prefer Write Request
+/// when allowed, otherwise fall back to Write Command.
+fn tx_write_op(flags: &CharacteristicFlags) -> WriteOp {
+    if flags.write || !flags.write_without_response {
+        WriteOp::Request
+    } else {
+        WriteOp::Command
+    }
+}
+
 /// Resolve the three ATVV GATT characteristics from a connected device.
 pub async fn resolve_chars(device: &Device) -> Result<AtvvChars> {
     let mut tx = None;
@@ -209,8 +225,13 @@ pub async fn resolve_chars(device: &Device) -> Result<AtvvChars> {
         break; // Found the ATVV service; no need to check other services.
     }
 
+    let tx: Characteristic = tx.context("ATVV TX characteristic not found")?;
+    let tx_write_op = tx_write_op(&tx.flags().await?);
+    tracing::debug!("TX write op: {:?}", tx_write_op);
+
     Ok(AtvvChars {
-        tx: tx.context("ATVV TX characteristic not found")?,
+        tx,
+        tx_write_op,
         rx: rx.context("ATVV RX characteristic not found")?,
         ctl: ctl.context("ATVV CTL characteristic not found")?,
     })
@@ -291,4 +312,23 @@ pub async fn vendor_handshake(device: &Device) -> Result<Option<crate::atvv::Ble
     // Return the ff02 stream so the caller can hold it alive for the session.
     // Dropping it would call StopNotify and reset the remote's ATVV-ready state.
     Ok(ff02_stream)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tx_write_op_prefers_request() {
+        let flags = CharacteristicFlags { write: true, write_without_response: true, ..Default::default() };
+        assert_eq!(tx_write_op(&flags), WriteOp::Request);
+        let flags = CharacteristicFlags { write: true, ..Default::default() };
+        assert_eq!(tx_write_op(&flags), WriteOp::Request);
+    }
+
+    #[test]
+    fn test_tx_write_op_command_when_only_write_without_response() {
+        let flags = CharacteristicFlags { write_without_response: true, ..Default::default() };
+        assert_eq!(tx_write_op(&flags), WriteOp::Command);
+    }
 }
