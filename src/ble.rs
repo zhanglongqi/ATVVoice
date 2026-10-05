@@ -4,7 +4,10 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use bluer::{gatt::{remote::Characteristic, CharacteristicFlags, WriteOp}, Adapter, AdapterEvent, Address, Device, Uuid};
+use bluer::{
+    gatt::{remote::Characteristic, CharacteristicFlags, WriteOp},
+    Adapter, AdapterEvent, Address, Device, Uuid,
+};
 use futures::{Stream, StreamExt};
 
 use crate::atvv::{BleDevice, BleFut, BleStream, DeviceConnectionEvent};
@@ -79,19 +82,26 @@ impl BleDevice for BluerDevice<'_> {
         Box::pin(async move {
             // See `tx_write_op`: Write Request where the TX characteristic
             // supports it, Write Command where it only has write-without-response.
-            self.chars.tx.write_ext(&data, &bluer::gatt::remote::CharacteristicWriteRequest {
-                op_type: self.chars.tx_write_op,
-                ..Default::default()
-            }).await?;
+            self.chars
+                .tx
+                .write_ext(
+                    &data,
+                    &bluer::gatt::remote::CharacteristicWriteRequest {
+                        op_type: self.chars.tx_write_op,
+                        ..Default::default()
+                    },
+                )
+                .await?;
             Ok(())
         })
     }
 
     fn ctl_notifications(&self) -> BleFut<'_, BleStream<Vec<u8>>> {
         Box::pin(async {
-            let reader = self.chars.ctl.notify_io().await
-                .context("Failed to acquire exclusive CTL notifications. \
-                          Another ATVVoice instance may be connected to this device.")?;
+            let reader = self.chars.ctl.notify_io().await.context(
+                "Failed to acquire exclusive CTL notifications. \
+                          Another ATVVoice instance may be connected to this device.",
+            )?;
             tracing::debug!("CTL AcquireNotify: exclusive access, MTU={}", reader.mtu());
             Ok(reader_to_stream(reader))
         })
@@ -99,9 +109,10 @@ impl BleDevice for BluerDevice<'_> {
 
     fn rx_notifications(&self) -> BleFut<'_, BleStream<Vec<u8>>> {
         Box::pin(async {
-            let reader = self.chars.rx.notify_io().await
-                .context("Failed to acquire exclusive RX notifications. \
-                          Another ATVVoice instance may be connected to this device.")?;
+            let reader = self.chars.rx.notify_io().await.context(
+                "Failed to acquire exclusive RX notifications. \
+                          Another ATVVoice instance may be connected to this device.",
+            )?;
             tracing::debug!("RX AcquireNotify: exclusive access, MTU={}", reader.mtu());
             Ok(reader_to_stream(reader))
         })
@@ -111,18 +122,16 @@ impl BleDevice for BluerDevice<'_> {
         Box::pin(async {
             let stream = self.device.events().await?;
             let mapped = stream.filter_map(|event| async move {
-                if let bluer::DeviceEvent::PropertyChanged(
-                    bluer::DeviceProperty::Connected(false),
-                ) = event
+                if let bluer::DeviceEvent::PropertyChanged(bluer::DeviceProperty::Connected(
+                    false,
+                )) = event
                 {
                     Some(DeviceConnectionEvent::Disconnected)
                 } else {
                     None
                 }
             });
-            Ok(
-                Box::pin(mapped) as BleStream<DeviceConnectionEvent>,
-            )
+            Ok(Box::pin(mapped) as BleStream<DeviceConnectionEvent>)
         })
     }
 }
@@ -185,7 +194,9 @@ pub async fn find_atvv_device(
         }
     }
 
-    anyhow::bail!("BLE discovery stream ended without finding an ATVV device (adapter may have been removed)")
+    anyhow::bail!(
+        "BLE discovery stream ended without finding an ATVV device (adapter may have been removed)"
+    )
 }
 
 /// Pick the ATT write operation for the TX characteristic.
@@ -299,10 +310,15 @@ pub async fn vendor_handshake(device: &Device) -> Result<Option<crate::atvv::Ble
     };
 
     // Step 2: Write "ntf_enable" to ff01 to signal readiness.
-    ff01.write_ext(b"ntf_enable", &bluer::gatt::remote::CharacteristicWriteRequest {
-        op_type: WriteOp::Request,
-        ..Default::default()
-    }).await.context("Philips vendor handshake: write to ff01 failed")?;
+    ff01.write_ext(
+        b"ntf_enable",
+        &bluer::gatt::remote::CharacteristicWriteRequest {
+            op_type: WriteOp::Request,
+            ..Default::default()
+        },
+    )
+    .await
+    .context("Philips vendor handshake: write to ff01 failed")?;
     tracing::debug!("Vendor handshake: wrote ntf_enable to ff01");
 
     // Step 3: Wait for remote to process and enter ATVV-ready state.
@@ -320,15 +336,25 @@ mod tests {
 
     #[test]
     fn test_tx_write_op_prefers_request() {
-        let flags = CharacteristicFlags { write: true, write_without_response: true, ..Default::default() };
+        let flags = CharacteristicFlags {
+            write: true,
+            write_without_response: true,
+            ..Default::default()
+        };
         assert_eq!(tx_write_op(&flags), WriteOp::Request);
-        let flags = CharacteristicFlags { write: true, ..Default::default() };
+        let flags = CharacteristicFlags {
+            write: true,
+            ..Default::default()
+        };
         assert_eq!(tx_write_op(&flags), WriteOp::Request);
     }
 
     #[test]
     fn test_tx_write_op_command_when_only_write_without_response() {
-        let flags = CharacteristicFlags { write_without_response: true, ..Default::default() };
+        let flags = CharacteristicFlags {
+            write_without_response: true,
+            ..Default::default()
+        };
         assert_eq!(tx_write_op(&flags), WriteOp::Command);
     }
 }

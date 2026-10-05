@@ -24,7 +24,10 @@ const DISCOVERY_RETRY_DELAY: Duration = Duration::from_secs(5);
 const DECODER_CHANNEL_CAPACITY: usize = 64;
 
 #[derive(Parser)]
-#[command(name = "atvvoice", about = "ATVVoice - BLE voice remote microphone daemon")]
+#[command(
+    name = "atvvoice",
+    about = "ATVVoice - BLE voice remote microphone daemon"
+)]
 struct Cli {
     /// Filter by Bluetooth address (e.g., AA:BB:CC:DD:EE:FF)
     #[arg(short, long)]
@@ -399,14 +402,18 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
             };
-            tracing::info!("Negotiated protocol: {} ({:?}, {}Hz)", session_protocol.version(), codec, codec.sample_rate());
+            tracing::info!(
+                "Negotiated protocol: {} ({:?}, {}Hz)",
+                session_protocol.version(),
+                codec,
+                codec.sample_rate()
+            );
 
             let sample_rate = codec.sample_rate();
             let (frame_tx, mut frame_rx) =
                 tokio::sync::mpsc::channel::<protocol::types::AudioFrame>(DECODER_CHANNEL_CAPACITY);
             let (pcm_tx, pcm_rx) = std::sync::mpsc::channel::<Vec<i16>>();
-            let (pw_shutdown_tx, pw_shutdown_rx) =
-                pipewire::channel::channel::<pw::Shutdown>();
+            let (pw_shutdown_tx, pw_shutdown_rx) = pipewire::channel::channel::<pw::Shutdown>();
 
             let (consumer_tx, consumer_rx) = if cli.mic_on_demand {
                 let (tx, rx) = tokio::sync::mpsc::channel(16);

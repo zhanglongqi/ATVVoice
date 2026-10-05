@@ -176,8 +176,6 @@ pub async fn run_session(
     // Physical press in progress on a hold-to-talk remote, if any.
     let mut htt_press: Option<HttPress> = None;
 
-
-
     // Keepalive: reset the remote's audio transfer timeout (spec §4.6.1)
     // using protocol.keepalive_cmd() (MIC_EXTEND for v1.0, MIC_OPEN for v0.4).
     let keepalive_interval = timeouts.keepalive;
@@ -537,10 +535,7 @@ mod tests {
                     .await
                     .take()
                     .expect("connection_events called more than once");
-                Ok(
-                    Box::pin(UnboundedReceiverStream::new(rx))
-                        as BleStream<DeviceConnectionEvent>,
-                )
+                Ok(Box::pin(UnboundedReceiverStream::new(rx)) as BleStream<DeviceConnectionEvent>)
             })
         }
     }
@@ -556,7 +551,9 @@ mod tests {
     }
 
     /// Helper: receive all currently buffered commands from the mock controls.
-    async fn try_recv_all_commands(rx: &mut tokio_mpsc::UnboundedReceiver<Vec<u8>>) -> Vec<Vec<u8>> {
+    async fn try_recv_all_commands(
+        rx: &mut tokio_mpsc::UnboundedReceiver<Vec<u8>>,
+    ) -> Vec<Vec<u8>> {
         let mut cmds = Vec::new();
         while let Ok(cmd) = rx.try_recv() {
             cmds.push(cmd);
@@ -945,8 +942,6 @@ mod tests {
         let result = session.await.unwrap();
         assert!(result.is_ok());
     }
-
-
 
     // ── Test: Consumer connect triggers MIC_OPEN when Connected ────
 
@@ -1494,9 +1489,7 @@ mod tests {
         assert!(wait_for_state(&mut state_rx, State::Streaming, Duration::from_millis(10)).await);
 
         // AUDIO_STOP with reason=HttButtonRelease (0x02) → should NOT send MIC_CLOSE
-        ctrl.ctl_tx
-            .send(vec![CTL_AUDIO_STOP, 0x02])
-            .unwrap();
+        ctrl.ctl_tx.send(vec![CTL_AUDIO_STOP, 0x02]).unwrap();
         tokio::time::advance(Duration::from_millis(1)).await;
         assert!(wait_for_state(&mut state_rx, State::Connected, Duration::from_millis(10)).await);
 
@@ -1598,8 +1591,11 @@ mod tests {
 
         /// Physical press: AUDIO_START(HoldToTalk) + START_SEARCH, held for `hold`.
         async fn press(&mut self, stream_id: u8, hold: Duration) {
-            self.ctl(&[CTL_AUDIO_START, 0x03, 0x02, stream_id], Duration::from_millis(1))
-                .await;
+            self.ctl(
+                &[CTL_AUDIO_START, 0x03, 0x02, stream_id],
+                Duration::from_millis(1),
+            )
+            .await;
             self.ctl(&[CTL_START_SEARCH], hold).await;
         }
 
@@ -1627,7 +1623,10 @@ mod tests {
         s.press(0x02, Duration::from_millis(100)).await;
         s.expect_state(State::Streaming).await;
         let cmds = s.commands().await;
-        assert!(cmds.is_empty(), "START_SEARCH during an HTT press must be ignored, got: {cmds:?}");
+        assert!(
+            cmds.is_empty(),
+            "START_SEARCH during an HTT press must be ignored, got: {cmds:?}"
+        );
 
         s.finish().await;
     }
@@ -1642,7 +1641,10 @@ mod tests {
         s.release().await;
         s.expect_state(State::Connected).await;
         let cmds = s.commands().await;
-        assert!(cmds.is_empty(), "hold release must not send commands, got: {cmds:?}");
+        assert!(
+            cmds.is_empty(),
+            "hold release must not send commands, got: {cmds:?}"
+        );
 
         s.finish().await;
     }
@@ -1657,8 +1659,11 @@ mod tests {
         s.release().await;
         assert_eq!(s.commands().await, vec![V10_MIC_OPEN.to_vec()]);
         s.expect_state(State::Opening).await;
-        s.ctl(&[CTL_AUDIO_START, 0x00, 0x02, 0x00], Duration::from_millis(1))
-            .await;
+        s.ctl(
+            &[CTL_AUDIO_START, 0x00, 0x02, 0x00],
+            Duration::from_millis(1),
+        )
+        .await;
         s.expect_state(State::Streaming).await;
 
         // A release report outside a tracked press must not drop the stream.
@@ -1686,8 +1691,11 @@ mod tests {
 
         s.press(0x02, Duration::from_millis(150)).await;
         s.release().await;
-        s.ctl(&[CTL_AUDIO_START, 0x00, 0x02, 0x00], Duration::from_millis(1))
-            .await;
+        s.ctl(
+            &[CTL_AUDIO_START, 0x00, 0x02, 0x00],
+            Duration::from_millis(1),
+        )
+        .await;
         s.expect_state(State::Streaming).await;
         s.commands().await;
 
@@ -1714,8 +1722,11 @@ mod tests {
         s.release().await;
         s.expect_state(State::Opening).await;
 
-        s.ctl(&[CTL_AUDIO_START, 0x00, 0x02, 0x00], Duration::from_millis(1))
-            .await;
+        s.ctl(
+            &[CTL_AUDIO_START, 0x00, 0x02, 0x00],
+            Duration::from_millis(1),
+        )
+        .await;
         s.expect_state(State::Streaming).await;
 
         s.finish().await;
