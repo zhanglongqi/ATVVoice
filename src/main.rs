@@ -41,6 +41,14 @@ struct Cli {
     #[arg(short, long, default_value = "20")]
     gain: f32,
 
+    /// High-pass cutoff in Hz to remove the mic's DC offset and start-of-stream "pop". 0 = disabled.
+    #[arg(long, default_value = "0")]
+    highpass: f32,
+
+    /// Fade-in at the start of each stream, in milliseconds. 0 = disabled.
+    #[arg(long, default_value = "0")]
+    fade_in: f32,
+
     /// Close mic after N seconds without audio frames (device asleep). 0 = disabled.
     #[arg(long, default_value = "5")]
     frame_timeout: u64,
@@ -438,13 +446,24 @@ async fn main() -> anyhow::Result<()> {
                 }
             });
 
-            // Post-processing task: Protocol already decoded the audio,
-            // so we just apply declip/lowpass/gain and forward PCM.
+            // Post-processing task: Protocol already decoded the audio, so we apply
+            // declip/lowpass/high-pass/fade-in here and forward PCM (gain is applied in the PipeWire thread).
+            let mut stream_filter =
+                adpcm::StreamFilter::new(sample_rate, cli.highpass, cli.fade_in);
+            tracing::info!(
+                "Post-processing: high-pass {} Hz, fade-in {} ms (0 = off)",
+                cli.highpass,
+                cli.fade_in
+            );
             let decoder_handle = tokio::spawn(async move {
                 while let Some(frame) = frame_rx.recv().await {
+                    if frame.stream_start {
+                        stream_filter.start_stream();
+                    }
                     let mut samples = frame.samples;
                     adpcm::declip(&mut samples);
                     adpcm::lowpass(&mut samples);
+                    stream_filter.process(&mut samples);
                     let _ = pcm_tx.send(samples);
                 }
             });

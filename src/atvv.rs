@@ -176,6 +176,9 @@ pub async fn run_session(
     // Physical press in progress on a hold-to-talk remote, if any.
     let mut htt_press: Option<HttPress> = None;
 
+    // Set on AUDIO_START of a new stream; the next audio frame carries it to post-processing.
+    let mut stream_starting = false;
+
     // Keepalive: reset the remote's audio transfer timeout (spec §4.6.1)
     // using protocol.keepalive_cmd() (MIC_EXTEND for v1.0, MIC_OPEN for v0.4).
     let keepalive_interval = timeouts.keepalive;
@@ -244,6 +247,10 @@ pub async fn run_session(
                     }
                     CtlEvent::AudioStart { reason, codec, stream_id } => {
                         tracing::info!("AUDIO_START (reason={:?}, codec={:?}, stream_id={:?})", reason, codec, stream_id);
+                        // A repeated AUDIO_START while already streaming (v0.4 keepalive) is not a new stream.
+                        if state != State::Streaming {
+                            stream_starting = true;
+                        }
                         if reason == AudioStartReason::HoldToTalk {
                             htt_press = Some(HttPress {
                                 began: Instant::now(),
@@ -310,7 +317,8 @@ pub async fn run_session(
             }
             Some(data) = rx_stream.next() => {
                 if state == State::Streaming {
-                    if let Some(frame) = protocol.decode_audio(&data) {
+                    if let Some(mut frame) = protocol.decode_audio(&data) {
+                        frame.stream_start = std::mem::take(&mut stream_starting);
                         // Reset frame timer on every audio frame
                         if frame_timeout_enabled {
                             frame_timer.as_mut().reset(Instant::now() + timeouts.frame_timeout);
@@ -1517,6 +1525,7 @@ mod tests {
 
     struct HttSession {
         ctrl: MockControls,
+        audio_rx: tokio_mpsc::Receiver<AudioFrame>,
         state_rx: tokio::sync::watch::Receiver<State>,
         session: tokio::task::JoinHandle<Result<()>>,
     }
@@ -1525,7 +1534,7 @@ mod tests {
         use crate::protocol::v10::ProtocolV10;
 
         let (device, ctrl) = mock_device();
-        let (audio_tx, _audio_rx) = tokio_mpsc::channel(64);
+        let (audio_tx, audio_rx) = tokio_mpsc::channel(64);
         let (state_tx, state_rx) = tokio::sync::watch::channel(State::Connected);
 
         let timeouts = SessionTimeouts {
@@ -1565,6 +1574,7 @@ mod tests {
         tokio::time::advance(Duration::from_millis(1)).await;
         HttSession {
             ctrl,
+            audio_rx,
             state_rx,
             session,
         }
@@ -1728,6 +1738,45 @@ mod tests {
         )
         .await;
         s.expect_state(State::Streaming).await;
+
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn test_first_frame_of_a_new_stream_is_marked() {
+        tokio::time::pause();
+        let mut s = spawn_v10_htt_session().await;
+        let frame = || vec![0x11u8; 160];
+
+        // Hold-to-talk stream: the first frame starts a stream, the next does not.
+        s.press(0x02, Duration::from_millis(1)).await;
+        s.ctrl.rx_tx.send(frame()).unwrap();
+        s.ctrl.rx_tx.send(frame()).unwrap();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(s.audio_rx.recv().await.unwrap().stream_start);
+        assert!(!s.audio_rx.recv().await.unwrap().stream_start);
+
+        // A repeated AUDIO_START while already streaming (v0.4 keepalive style) is not a new stream.
+        s.ctl(
+            &[CTL_AUDIO_START, 0x03, 0x02, 0x02],
+            Duration::from_millis(1),
+        )
+        .await;
+        s.ctrl.rx_tx.send(frame()).unwrap();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(!s.audio_rx.recv().await.unwrap().stream_start);
+
+        // After the stream ends, a host-opened stream starts afresh.
+        s.ctl(&[CTL_AUDIO_STOP, 0x02], Duration::from_secs(1)).await;
+        s.expect_state(State::Connected).await;
+        s.ctl(
+            &[CTL_AUDIO_START, 0x00, 0x02, 0x00],
+            Duration::from_millis(1),
+        )
+        .await;
+        s.ctrl.rx_tx.send(frame()).unwrap();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(s.audio_rx.recv().await.unwrap().stream_start);
 
         s.finish().await;
     }
