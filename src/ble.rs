@@ -131,7 +131,27 @@ impl BleDevice for BluerDevice<'_> {
                     None
                 }
             });
-            Ok(Box::pin(mapped) as BleStream<DeviceConnectionEvent>)
+            // When the adapter re-enumerates (e.g. across suspend) the device object vanishes and the
+            // event stream just goes quiet, so poll too: a failing or false is_connected() is a disconnect.
+            let device = self.device.clone();
+            let polled = futures::stream::unfold(device, |device| async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    match device.is_connected().await {
+                        Ok(true) => {}
+                        Ok(false) => break,
+                        Err(e) => {
+                            tracing::warn!(
+                                "is_connected() poll failed, device object is gone: {e}"
+                            );
+                            break;
+                        }
+                    }
+                }
+                Some((DeviceConnectionEvent::Disconnected, device))
+            });
+            Ok(Box::pin(futures::stream::select(mapped, polled))
+                as BleStream<DeviceConnectionEvent>)
         })
     }
 }
