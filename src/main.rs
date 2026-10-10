@@ -96,32 +96,63 @@ fn sanitize_name(s: &str) -> String {
     result.trim_matches('-').to_string()
 }
 
+/// Why [`ensure_connected`] returned.
+enum ConnectWait {
+    Connected,
+    /// The device's D-Bus object is gone, i.e. its adapter was removed or re-enumerated (a USB dongle
+    /// re-plugged, or powered off across suspend). Waiting on this handle would never return.
+    DeviceGone,
+}
+
 /// Wait for device to be connected, using event stream if possible.
-async fn ensure_connected(device: &bluer::Device) {
+async fn ensure_connected(device: &bluer::Device) -> ConnectWait {
     match device.is_connected().await {
-        Ok(true) => return,
-        Err(e) => tracing::warn!("is_connected() failed, assuming disconnected: {e}"),
+        Ok(true) => return ConnectWait::Connected,
+        Err(e) => {
+            tracing::warn!("is_connected() failed, device object is gone: {e}");
+            return ConnectWait::DeviceGone;
+        }
         _ => {}
     }
     tracing::info!("Waiting for device to connect...");
-    if let Ok(mut events) = device.events().await {
-        while let Some(event) = futures::StreamExt::next(&mut events).await {
-            if let bluer::DeviceEvent::PropertyChanged(bluer::DeviceProperty::Connected(true)) =
-                event
-            {
-                return;
-            }
-        }
-    }
-    // Fallback: poll
+    // Watch the Connected property, and poll alongside it: when the device object is removed the event
+    // stream may simply go quiet rather than end, and only a failing is_connected() reveals it.
+    let mut events = device.events().await.ok();
     loop {
-        tokio::time::sleep(RETRY_DELAY).await;
-        match device.is_connected().await {
-            Ok(true) => return,
-            Err(e) => tracing::warn!("is_connected() poll failed: {e}"),
-            _ => {}
+        tokio::select! {
+            event = async {
+                match events.as_mut() {
+                    Some(stream) => futures::StreamExt::next(stream).await,
+                    None => std::future::pending().await,
+                }
+            } => match event {
+                Some(bluer::DeviceEvent::PropertyChanged(bluer::DeviceProperty::Connected(true))) => {
+                    return ConnectWait::Connected;
+                }
+                Some(_) => {}
+                None => events = None, // stream ended; keep polling
+            },
+            () = tokio::time::sleep(RETRY_DELAY) => match device.is_connected().await {
+                Ok(true) => return ConnectWait::Connected,
+                Err(e) => {
+                    tracing::warn!("is_connected() poll failed, device object is gone: {e}");
+                    return ConnectWait::DeviceGone;
+                }
+                Ok(false) => {}
+            },
         }
     }
+}
+
+/// Leave with an error when the device vanished from its adapter, so the service manager restarts us and
+/// adapter selection runs again (the remote may now sit on a renamed adapter, e.g. hci1 -> hci2).
+fn gone_error(device: &bluer::Device) -> anyhow::Error {
+    anyhow::anyhow!(
+        "device {} vanished from adapter {} (adapter removed or re-enumerated, e.g. after suspend); \
+         exiting so the service restarts and selects the adapter again",
+        device.address(),
+        device.adapter_name()
+    )
 }
 
 /// Check if an error indicates the device is locked by another instance.
@@ -260,7 +291,11 @@ async fn main() -> anyhow::Result<()> {
         };
 
         tokio::select! {
-            _ = ensure_connected(&device) => {}
+            wait = ensure_connected(&device) => {
+                if let ConnectWait::DeviceGone = wait {
+                    return Err(gone_error(&device));
+                }
+            }
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("Shutting down");
                 return Ok(());
@@ -534,7 +569,10 @@ async fn main() -> anyhow::Result<()> {
 
             // Wait for device to reconnect (C1: interruptible by ctrl+c)
             tokio::select! {
-                _ = ensure_connected(&device) => {
+                wait = ensure_connected(&device) => {
+                    if let ConnectWait::DeviceGone = wait {
+                        return Err(gone_error(&device));
+                    }
                     tracing::info!("Device reconnected");
                 }
                 _ = tokio::signal::ctrl_c() => {

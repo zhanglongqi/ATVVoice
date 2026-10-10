@@ -182,25 +182,41 @@ pub async fn select_adapter(
     requested: Option<&str>,
     device: Option<Address>,
 ) -> Result<Adapter> {
-    let mut adapters = Vec::new();
-    for name in session.adapter_names().await? {
-        let adapter = session.adapter(&name)?;
-        let has_paired_device = match device {
-            Some(addr) => match adapter.device(addr) {
-                Ok(dev) => dev.is_paired().await.unwrap_or(false),
-                Err(_) => false,
-            },
-            None => false,
-        };
-        adapters.push(AdapterInfo {
-            name,
-            address: adapter.address().await?,
-            has_paired_device,
-        });
-    }
-    match choose_adapter(&adapters, requested)? {
-        Some(name) => Ok(session.adapter(&name)?),
-        None => Ok(session.default_adapter().await?),
+    let mut waiting = false;
+    loop {
+        let mut adapters = Vec::new();
+        for name in session.adapter_names().await? {
+            let adapter = session.adapter(&name)?;
+            let has_paired_device = match device {
+                Some(addr) => match adapter.device(addr) {
+                    Ok(dev) => dev.is_paired().await.unwrap_or(false),
+                    Err(_) => false,
+                },
+                None => false,
+            };
+            adapters.push(AdapterInfo {
+                name,
+                address: adapter.address().await?,
+                has_paired_device,
+            });
+        }
+        match choose_adapter(&adapters, requested)? {
+            Some(name) => return Ok(session.adapter(&name)?),
+            // A given remote that no adapter has paired yet: its adapter is probably still coming up
+            // (a USB dongle re-enumerating after suspend). Wait for it instead of settling on the default
+            // adapter, where a bonded-only daemon would wait for that remote forever.
+            None if device.is_some() && requested.is_none() => {
+                if !waiting {
+                    tracing::info!(
+                        "Device {} is not paired on any adapter yet; waiting for its adapter...",
+                        device.expect("checked is_some")
+                    );
+                    waiting = true;
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            None => return Ok(session.default_adapter().await?),
+        }
     }
 }
 
